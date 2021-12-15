@@ -2,6 +2,9 @@
 import os
 import shutil
 import pandas as pd
+from PIL import Image
+from torch.utils.data import Dataset
+import numpy as np
 
 def make_dirs():
   """
@@ -39,3 +42,41 @@ def train_valid_split(dataset, source_dir, dest_dir):
 
     # copy the images from source to dest
     shutil.move(src= src, dst= dest)
+
+
+
+class PneumoDataset(Dataset):
+  """
+  Custom dataset for Pneumothorax Segmentation
+  """
+  def __init__(self, image_dir, mask_dir, transforms= None):
+    """
+    parameter: image_dir - path of the images present in the folder
+               mask_dir  - path of corresponding masks present in the folder
+               transforms- can provide different geometric transformations to the images and the corresponding masks
+    """
+    self.image_dir= image_dir
+    self.mask_dir= mask_dir
+    self.transforms= transforms
+
+    self.images= os.listdir(self.image_dir)
+
+  def __len__(self):
+    return len(self.images)
+  
+  def __getitem__(self):
+    image_path= os.path.join(self.image_dir, self.images[idx])
+    mask_path= os.path.join(self.mask_dir, self.images[idx])
+
+    # reading image and mask using PIL
+    image= np.array(Image.open(image_path).convert("RGB"))
+    mask= np.array(Image.open(mask_path).convert("L"), dtype= np.float32)
+    
+    mask[mask== 255.0]= 1.0
+    
+    if self.transforms is not None:
+      albumentations= self.transforms(image= image, mask= mask)
+      image= albumentations["image"]
+      mask= albumentations["mask"]
+    
+    return image,mask    
