@@ -1,85 +1,75 @@
 # importing library
 import torch
-import torch.nn as nn
-from torchvision.transforms import functional as F
+from torch.nn import functional as F
 
 # Repeatitive convolution layers , so creating class that just do the job of calling it and access doube convolution layers
-class ConvLayers(nn.Module):
-  def __init__(self,in_channels, out_channels):
-    super(ConvLayers,self).__init__()
-    self.conv= nn.Sequential(
-        nn.Conv2d(in_channels= in_channels, out_channels= out_channels, kernel_size= 3, stride= 1, padding= 1, bias= False),
-        nn.BatchNorm2d(out_channels),
-        nn.ReLU(inplace= True),
-        nn.Conv2d(in_channels= out_channels, out_channels= out_channels, kernel_size= 3, stride= 1, padding= 1, bias= False),
-        nn.BatchNorm2d(out_channels),
-        nn.ReLU(inplace= True)
-    )
-  
-  def forward(self,x):
-    return self.conv(x)
-
-
-
-class UNET(nn.Module):
-  def __init__(self, in_channels= 1, out_channels= 1, features= [64, 128, 256, 512]):
-    super(UNET,self).__init__()
-    self.upward= nn.ModuleList()
-    self.downward= nn.ModuleList()
-    self.pool= nn.MaxPool2d(kernel_size= 2, stride= 2)
-
-    # downward convolutions of Unet: Conv2d
-    for feature in features:
-      self.downward.append(ConvLayers(in_channels= in_channels, out_channels= feature))
-      in_channels= feature
+class Block(torch.nn.Module):
+    def __init__(self, in_channels, mid_channel, out_channels, batch_norm=False):
+        super().__init__()
+        
+        self.conv1 = torch.nn.Conv2d(in_channels=in_channels, out_channels=mid_channel, kernel_size=3, padding=1)
+        self.conv2 = torch.nn.Conv2d(in_channels=mid_channel, out_channels=out_channels, kernel_size=3, padding=1)
+        
+        self.batch_norm = batch_norm
+        if batch_norm:
+            self.bn1 = torch.nn.BatchNorm2d(mid_channel)
+            self.bn2 = torch.nn.BatchNorm2d(out_channels)
+            
+    def forward(self, x):
+        x = self.conv1(x)
+        if self.batch_norm:
+            x = self.bn1(x)
+        x = F.relu(x, inplace=True)
+        
+        x = self.conv2(x)
+        if self.batch_norm:
+            x = self.bn2(x)
+        out = F.relu(x, inplace=True)
+        return out
     
-    # Upward convolutions of Unet: ConvTranspose2d
-    for feature in reversed(features):
-      self.upward.append(
-          nn.ConvTranspose2d(in_channels= feature*2, out_channels= feature, kernel_size= 2, stride= 2)
-      )
-      self.upward.append(ConvLayers(in_channels= feature*2, out_channels= feature))
-    
-    # lowest layer which is present below containing 1024 channels
-    self.baseLayer= ConvLayers(in_channels= features[-1], out_channels= features[-1]*2)
 
-    # final output conv layer
-    self.outputLayer= nn.Conv2d(in_channels= features[0], out_channels= out_channels, kernel_size=1)
+class UNet(torch.nn.Module):
+    def up(self, x, size):
+        return F.interpolate(x, size=size, mode=self.upscale_mode)
+    
+    def down(self, x):
+        return F.max_pool2d(x, kernel_size=2)
+    
+    def __init__(self, in_channels, out_channels, batch_norm=False, upscale_mode="nearest"):
+        super().__init__()
+        
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.batch_norm = batch_norm
+        self.upscale_mode = upscale_mode
+        
+        self.enc1 = Block(in_channels, 64, 64, batch_norm)
+        self.enc2 = Block(64, 128, 128, batch_norm)
+        self.enc3 = Block(128, 256, 256, batch_norm)
+        self.enc4 = Block(256, 512, 512, batch_norm)
+        
+        self.center = Block(512, 1024, 512, batch_norm)
+        
+        self.dec4 = Block(1024, 512, 256, batch_norm)
+        self.dec3 = Block(512, 256, 128, batch_norm)
+        self.dec2 = Block(256, 128, 64, batch_norm)
+        self.dec1 = Block(128, 64, 64, batch_norm)
+        
+        self.out = torch.nn.Conv2d(in_channels=64, out_channels=out_channels, kernel_size=1)
 
-  def forward(self, x):
-    # storing all the skip connection in the list
-    skip_connections= []
-
-    # forwarding through downward layers
-    for down in self.downward:
-      x= down(x)
-      
-      # adding skip connections
-      skip_connections.append(x)
-      x= self.pool(x)
-    
-    # forwarding through the base layer
-    x= self.baseLayer(x)
-    
-    # reversing the skip connections list to concat it easily
-    skip_connections= skip_connections[::-1]
-    
-    # forwarding through upward layers
-    for idx in range(0, len(self.upward), 2):
-      x= self.upward[idx](x)
-      
-      # concatenating the skip connections
-      skip_connection= skip_connections[idx//2]
-
-      # Resolving problem of MaxPooling during odd number of height and width 
-      if x.shape != skip_connection.shape: 
-        x= F.resize(x, size= skip_connection.shape[2:])
-      
-      
-      concat_skip= torch.cat((skip_connection,x), dim= 1)
-      
-      x= self.upward[idx+1](concat_skip)
-    # final output layer
-    return self.outputLayer(x)
-    
-  
+    def forward(self, x):
+        enc1 = self.enc1(x)
+        enc2 = self.enc2(self.down(enc1))
+        enc3 = self.enc3(self.down(enc2))
+        enc4 = self.enc4(self.down(enc3))
+        
+        center = self.center(self.down(enc4))
+        
+        dec4 = self.dec4(torch.cat([self.up(center, enc4.size()[-2:]), enc4], 1))
+        dec3 = self.dec3(torch.cat([self.up(dec4, enc3.size()[-2:]), enc3], 1))
+        dec2 = self.dec2(torch.cat([self.up(dec3, enc2.size()[-2:]), enc2], 1))
+        dec1 = self.dec1(torch.cat([self.up(dec2, enc1.size()[-2:]), enc1], 1))
+        
+        out = self.out(dec1)
+        
+        return out
